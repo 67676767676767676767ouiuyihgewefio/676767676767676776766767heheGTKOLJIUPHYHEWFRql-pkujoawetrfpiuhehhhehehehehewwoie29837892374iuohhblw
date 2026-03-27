@@ -2,9 +2,9 @@ local Rayfield = loadstring(game:HttpGet('https://sirius.menu/rayfield'))()
 
 local Window = Rayfield:CreateWindow({
     Name = "zurx <3",
-    LoadingTitle = "im top skid",
+    LoadingTitle = "Top 1 Skid",
     Icon = "gem",
-    LoadingSubtitle = "<3",
+    LoadingSubtitle = "skidded",
     ConfigurationSaving = {
         Enabled = true,
         FolderName = "CuackerBlox",
@@ -13,374 +13,6 @@ local Window = Rayfield:CreateWindow({
     Discord = {Enabled = false},
     KeySystem = false
 })
-
--- ============================================================================
--- ULTIMATE PREDICTION SYSTEM - WORLD-CLASS MOVEMENT PREDICTION
--- ============================================================================
-
-local PRED_WINDOW = 20
-local PRED_TP_DIST = 100
-local PRED_JERK_MAX = 8000
-local PRED_DECAY = 0.88
-local MIN_SAMPLES = 4
-local MAX_PRED_AHEAD = 2.5
-local VELOCITY_SMOOTH = 0.7
-local ACCEL_SMOOTH = 0.6
-
--- EKF State: [px, py, pz, vx, vy, vz, ax, ay, az]
-local ekfState = {0, 0, 0, 0, 0, 0, 0, 0, 0}
-local ekfCovariance = {}
-local ekfInitialized = false
-
--- Prediction buffer
-local predBuf = {}
-for i = 1, PRED_WINDOW do 
-    predBuf[i] = {px=0, py=0, pz=0, vx=0, vy=0, vz=0, t=0, valid=false} 
-end
-local predBufN, predBufHead = 0, 0
-
--- Multi-model predictions
-local models = {
-    linear = {weight = 0.33, confidence = 0},
-    quadratic = {weight = 0.33, confidence = 0},
-    cubic = {weight = 0.34, confidence = 0}
-}
-
--- Kalman state
-local kPx, kPy, kPz = 0, 0, 0
-local kVx, kVy, kVz = 0, 0, 0
-local kAx, kAy, kAz = 0, 0, 0
-local kJx, kJy, kJz = 0, 0, 0
-local kReady, predConf = false, 0
-
--- Advanced tracking
-local lastPredPos, lastPredTime = nil, nil
-local lastVelocity = nil
-local lastAcceleration = nil
-local velocityHistory = {}
-local accelerationHistory = {}
-local behaviorPattern = {
-    avgSpeed = 0,
-    avgAccel = 0,
-    changeFrequency = 0,
-    predictability = 0.5
-}
-
--- Adaptive parameters
-local orbitAutoPrediction = true
-local adaptiveHorizon = true
-
--- Utility functions
-local function vec3Mag(x, y, z)
-    return math.sqrt(x*x + y*y + z*z)
-end
-
-local function vec3Dist(x1, y1, z1, x2, y2, z2)
-    local dx, dy, dz = x2-x1, y2-y1, z2-z1
-    return math.sqrt(dx*dx + dy*dy + dz*dz)
-end
-
-local function clamp(val, min, max)
-    return math.max(min, math.min(max, val))
-end
-
--- EKF Functions
-local function initEKF()
-    ekfCovariance = {}
-    for i = 1, 9 do
-        ekfCovariance[i] = {}
-        for j = 1, 9 do
-            ekfCovariance[i][j] = (i == j) and 100 or 0
-        end
-    end
-    ekfInitialized = true
-end
-
-local function ekfPredict(dt)
-    if not ekfInitialized then return end
-    local dt2 = 0.5 * dt * dt
-    ekfState[1] = ekfState[1] + ekfState[4]*dt + ekfState[7]*dt2
-    ekfState[2] = ekfState[2] + ekfState[5]*dt + ekfState[8]*dt2
-    ekfState[3] = ekfState[3] + ekfState[6]*dt + ekfState[9]*dt2
-    ekfState[4] = ekfState[4] + ekfState[7]*dt
-    ekfState[5] = ekfState[5] + ekfState[8]*dt
-    ekfState[6] = ekfState[6] + ekfState[9]*dt
-    for i = 1, 9 do
-        ekfCovariance[i][i] = ekfCovariance[i][i] + (i <= 3 and 10 or (i <= 6 and 50 or 100))
-    end
-end
-
-local function ekfUpdate(px, py, pz, vx, vy, vz)
-    if not ekfInitialized then initEKF() end
-    local K = 0.3
-    ekfState[1] = ekfState[1] + K * (px - ekfState[1])
-    ekfState[2] = ekfState[2] + K * (py - ekfState[2])
-    ekfState[3] = ekfState[3] + K * (pz - ekfState[3])
-    if vx and vy and vz then
-        ekfState[4] = ekfState[4] + K * (vx - ekfState[4])
-        ekfState[5] = ekfState[5] + K * (vy - ekfState[5])
-        ekfState[6] = ekfState[6] + K * (vz - ekfState[6])
-    end
-    for i = 1, 9 do
-        ekfCovariance[i][i] = ekfCovariance[i][i] * (1 - K)
-    end
-end
-
--- Polynomial fitting
-local function fitPolynomial(degree)
-    local n = predBufN
-    if n < MIN_SAMPLES then return nil end
-    local head = predBufHead
-    local tn = predBuf[head].t
-    local matSize = degree + 1
-    local A = {}
-    for i = 1, matSize do
-        A[i] = {}
-        for j = 1, matSize do A[i][j] = 0 end
-    end
-    local bx, by, bz = {}, {}, {}
-    for i = 1, matSize do bx[i], by[i], bz[i] = 0, 0, 0 end
-    local w = 1.0
-    for i = 0, n-1 do
-        local idx = ((head - 1 - i) % PRED_WINDOW) + 1
-        local slot = predBuf[idx]
-        if not slot.valid then break end
-        local s = slot.t - tn
-        local powers = {1}
-        for d = 1, degree do powers[d+1] = powers[d] * s end
-        for row = 1, matSize do
-            for col = 1, matSize do
-                A[row][col] = A[row][col] + w * powers[row] * powers[col]
-            end
-            bx[row] = bx[row] + w * powers[row] * slot.px
-            by[row] = by[row] + w * powers[row] * slot.py
-            bz[row] = bz[row] + w * powers[row] * slot.pz
-        end
-        w = w * PRED_DECAY
-    end
-    local function solveSystem(A, b)
-        local n = #A
-        local x = {}
-        for i = 1, n do
-            local maxRow = i
-            for k = i+1, n do
-                if math.abs(A[k][i]) > math.abs(A[maxRow][i]) then maxRow = k end
-            end
-            A[i], A[maxRow] = A[maxRow], A[i]
-            b[i], b[maxRow] = b[maxRow], b[i]
-            for k = i+1, n do
-                if A[i][i] == 0 then return nil end
-                local c = A[k][i] / A[i][i]
-                for j = i, n do A[k][j] = A[k][j] - c * A[i][j] end
-                b[k] = b[k] - c * b[i]
-            end
-        end
-        for i = n, 1, -1 do
-            if A[i][i] == 0 then return nil end
-            x[i] = b[i]
-            for j = i+1, n do x[i] = x[i] - A[i][j] * x[j] end
-            x[i] = x[i] / A[i][i]
-        end
-        return x
-    end
-    local coeffsX = solveSystem(A, bx)
-    local coeffsY = solveSystem(A, by)
-    local coeffsZ = solveSystem(A, bz)
-    if not coeffsX or not coeffsY or not coeffsZ then return nil end
-    return {x = coeffsX, y = coeffsY, z = coeffsZ}
-end
-
-local function evaluatePolynomial(coeffs, t)
-    if not coeffs then return 0, 0, 0 end
-    local x, y, z = 0, 0, 0
-    local power = 1
-    for i = 1, #coeffs.x do
-        x = x + coeffs.x[i] * power
-        y = y + coeffs.y[i] * power
-        z = z + coeffs.z[i] * power
-        power = power * t
-    end
-    return x, y, z
-end
-
-local function multiModelPredict(ahead)
-    if predBufN < MIN_SAMPLES then return kPx, kPy, kPz, 0 end
-    local linear = fitPolynomial(1)
-    local quadratic = fitPolynomial(2)
-    local cubic = fitPolynomial(3)
-    local predictions = {}
-    local totalWeight = 0
-    if linear then
-        local lx, ly, lz = evaluatePolynomial(linear, ahead)
-        models.linear.confidence = math.min(models.linear.confidence + 0.1, 1.0)
-        table.insert(predictions, {x=lx, y=ly, z=lz, weight=models.linear.weight * models.linear.confidence})
-        totalWeight = totalWeight + models.linear.weight * models.linear.confidence
-    end
-    if quadratic then
-        local qx, qy, qz = evaluatePolynomial(quadratic, ahead)
-        models.quadratic.confidence = math.min(models.quadratic.confidence + 0.1, 1.0)
-        table.insert(predictions, {x=qx, y=qy, z=qz, weight=models.quadratic.weight * models.quadratic.confidence})
-        totalWeight = totalWeight + models.quadratic.weight * models.quadratic.confidence
-    end
-    if cubic then
-        local cx, cy, cz = evaluatePolynomial(cubic, ahead)
-        models.cubic.confidence = math.min(models.cubic.confidence + 0.1, 1.0)
-        table.insert(predictions, {x=cx, y=cy, z=cz, weight=models.cubic.weight * models.cubic.confidence})
-        totalWeight = totalWeight + models.cubic.weight * models.cubic.confidence
-    end
-    local finalX, finalY, finalZ = 0, 0, 0
-    for _, pred in ipairs(predictions) do
-        local w = pred.weight / totalWeight
-        finalX = finalX + pred.x * w
-        finalY = finalY + pred.y * w
-        finalZ = finalZ + pred.z * w
-    end
-    local confidence = totalWeight / 3.0
-    return finalX, finalY, finalZ, confidence
-end
-
-local function updateBehaviorPattern()
-    local speedSum = 0
-    local speedCount = 0
-    for i = 1, math.min(predBufN, 10) do
-        local idx = ((predBufHead - i) % PRED_WINDOW) + 1
-        if predBuf[idx].valid then
-            local spd = vec3Mag(predBuf[idx].vx, predBuf[idx].vy, predBuf[idx].vz)
-            speedSum = speedSum + spd
-            speedCount = speedCount + 1
-        end
-    end
-    if speedCount > 0 then behaviorPattern.avgSpeed = speedSum / speedCount end
-    if predBufN >= 5 then
-        local variance = 0
-        for i = 1, math.min(predBufN-1, 5) do
-            local idx1 = ((predBufHead - i) % PRED_WINDOW) + 1
-            local idx2 = ((predBufHead - i - 1) % PRED_WINDOW) + 1
-            if predBuf[idx1].valid and predBuf[idx2].valid then
-                local dv = vec3Dist(
-                    predBuf[idx1].vx, predBuf[idx1].vy, predBuf[idx1].vz,
-                    predBuf[idx2].vx, predBuf[idx2].vy, predBuf[idx2].vz
-                )
-                variance = variance + dv
-            end
-        end
-        behaviorPattern.predictability = math.max(0, 1 - variance / 500)
-    end
-end
-
-local function predReset()
-    predBufN, predBufHead = 0, 0
-    for i = 1, PRED_WINDOW do predBuf[i].valid = false end
-    kPx, kPy, kPz = 0, 0, 0
-    kVx, kVy, kVz = 0, 0, 0
-    kAx, kAy, kAz = 0, 0, 0
-    kJx, kJy, kJz = 0, 0, 0
-    kReady, predConf = false, 0
-    lastPredPos, lastPredTime = nil, nil
-    lastVelocity = nil
-    lastAcceleration = nil
-    velocityHistory = {}
-    accelerationHistory = {}
-    ekfInitialized = false
-    models.linear.confidence = 0
-    models.quadratic.confidence = 0
-    models.cubic.confidence = 0
-end
-
-local function predUpdate(pos)
-    local now = tick()
-    local px, py, pz = pos.X, pos.Y, pos.Z
-    local vx, vy, vz = 0, 0, 0
-    local dt = 0
-    if lastPredPos and lastPredTime then
-        dt = now - lastPredTime
-        if dt > 0 and dt < 0.5 then
-            vx = (px - lastPredPos.X) / dt
-            vy = (py - lastPredPos.Y) / dt
-            vz = (pz - lastPredPos.Z) / dt
-            if lastVelocity then
-                vx = lastVelocity.X + (vx - lastVelocity.X) * VELOCITY_SMOOTH
-                vy = lastVelocity.Y + (vy - lastVelocity.Y) * VELOCITY_SMOOTH
-                vz = lastVelocity.Z + (vz - lastVelocity.Z) * VELOCITY_SMOOTH
-            end
-            lastVelocity = Vector3.new(vx, vy, vz)
-        end
-    end
-    lastPredPos = pos
-    lastPredTime = now
-    if predBufN > 0 then
-        local s = predBuf[predBufHead]
-        if s.valid then
-            local dist = vec3Dist(px, py, pz, s.px, s.py, s.pz)
-            if dist > PRED_TP_DIST then
-                predReset()
-                return
-            end
-        end
-    end
-    predBufHead = (predBufHead % PRED_WINDOW) + 1
-    local slot = predBuf[predBufHead]
-    slot.px, slot.py, slot.pz = px, py, pz
-    slot.vx, slot.vy, slot.vz = vx, vy, vz
-    slot.t = now
-    slot.valid = true
-    predBufN = math.min(predBufN + 1, PRED_WINDOW)
-    ekfUpdate(px, py, pz, vx, vy, vz)
-    updateBehaviorPattern()
-    if predBufN >= MIN_SAMPLES then
-        local coeffs = fitPolynomial(2)
-        if coeffs then
-            if #coeffs.x >= 2 then
-                kVx = coeffs.x[2]
-                kVy = coeffs.y[2]
-                kVz = coeffs.z[2]
-            end
-            if #coeffs.x >= 3 then
-                kAx = coeffs.x[3] * 2
-                kAy = coeffs.y[3] * 2
-                kAz = coeffs.z[3] * 2
-            end
-            kPx, kPy, kPz = px, py, pz
-            kReady = true
-            predConf = math.min(predConf + 0.2, 1.0)
-        end
-    end
-end
-
-local function predExtrapolate(ahead)
-    if not kReady or predBufN < MIN_SAMPLES then
-        return Vector3.new(kPx, kPy, kPz), 0
-    end
-    local mpx, mpy, mpz, mconf = multiModelPredict(ahead)
-    local epx = ekfState[1] + ekfState[4]*ahead + 0.5*ekfState[7]*ahead*ahead
-    local epy = ekfState[2] + ekfState[5]*ahead + 0.5*ekfState[8]*ahead*ahead
-    local epz = ekfState[3] + ekfState[6]*ahead + 0.5*ekfState[9]*ahead*ahead
-    local blend = clamp(predConf * behaviorPattern.predictability, 0, 1)
-    local ekfWeight = 0.4
-    local multiWeight = 0.6
-    local finalX = mpx * multiWeight * blend + epx * ekfWeight * blend + kPx * (1 - blend)
-    local finalY = mpy * multiWeight * blend + epy * ekfWeight * blend + kPy * (1 - blend)
-    local finalZ = mpz * multiWeight * blend + epz * ekfWeight * blend + kPz * (1 - blend)
-    local totalConf = predConf * mconf * behaviorPattern.predictability
-    return Vector3.new(finalX, finalY, finalZ), totalConf
-end
-
-local function predLookAhead()
-    if not orbitAutoPrediction then return PredictionStrength or 0 end
-    local spd = vec3Mag(kVx, kVy, kVz)
-    local acc = vec3Mag(kAx, kAy, kAz)
-    local speedComponent = clamp(spd / 300, 0, 1.2)
-    local accelComponent = clamp(acc / 400, 0, 0.6)
-    local predictabilityBoost = behaviorPattern.predictability * 0.4
-    local horizon = (speedComponent + accelComponent + predictabilityBoost) * predConf
-    return clamp(horizon, 0, MAX_PRED_AHEAD)
-end
-
--- ============================================================================
--- END OF ULTIMATE PREDICTION SYSTEM
--- ============================================================================
-
-local KalmanPredEnabled = false
 
 local running = false
 local TeleportEnabled = false
@@ -405,17 +37,185 @@ local SpectateConnection = nil
 local ActiveTween = nil
 local AutoFarmPositions = false
 local AutoFarmConnection = nil
-local AutoStunDetection = false
-local StunDetectionConnection = nil
-local AutoKillEnabled = false
-local AutoKillConnection = nil
 local PlayerPositionHistory = {}
 local PREDICTION_SAMPLES = 3
 local PREDICTION_TIME = 0.25
+local InstaTeleportEnabled = false
+local InstaTpConnection = nil
+local SpectateEnabled = false
+local XOffset, YOffset, ZOffset = 0, 0, 0
+local DashLenghtDistance420 = 5
+local DashEnabled = false
+local DashConnection = nil
+local Unbreakable = false
+local UnbreakableConnection = nil
+local autoV4 = false
+local v4Connection = nil
+local autoEquipVenom = false
+local TestingFarm = false
+local TestingFarmConnection = nil
+local spikeee = false
+local spikeyconnection = nil
+local antispikey = false
+local antispikeyconnection = nil
+local FruitAttack = false
+local FruitAttackConnection = nil
+local FruitAttackConnectiongas = nil
+local FruitAttackConnection611417 = nil
+local FruitAttackConnectionControl = nil
+local FruitAttackConnection1 = nil
+local FruitAttackConnection12 = nil
+local FruitAttackConnectionTiger = nil
+local FruitAttackConnection16662 = nil
+local FruitAttackConnectiongrav2 = nil
 
-local SpeedEnabled = false
-local SpeedValue   = 1
-local SpeedConnection
+-- ════════════════════════════════════════
+--  KALMAN PREDICTION
+-- ════════════════════════════════════════
+local PRED_WINDOW   = 12
+local PRED_TP_DIST  = 500
+local PRED_JERK_MAX = 5000
+local PRED_DECAY    = 0.85
+local predBuf = {}
+for i = 1, PRED_WINDOW do predBuf[i] = {px=0,py=0,pz=0,t=0} end
+local predBufN, predBufHead = 0, 0
+local kPx,kPy,kPz = 0,0,0
+local kVx,kVy,kVz = 0,0,0
+local kAx,kAy,kAz = 0,0,0
+local kReady, predConf = false, 0
+local lastPredPos, lastPredTime = nil, nil
+local orbitAutoPrediction = true
+local KalmanPredEnabled = false
+local currentPredTarget = nil
+local predFeedConnection = nil
+
+local function predReset()
+    predBufN, predBufHead = 0, 0
+    kPx,kPy,kPz = 0,0,0
+    kVx,kVy,kVz = 0,0,0
+    kAx,kAy,kAz = 0,0,0
+    kReady, predConf = false, 0
+    lastPredPos, lastPredTime = nil, nil
+end
+
+local function predFitWindow()
+    local n = predBufN
+    if n < 2 then return end
+    local head = predBufHead
+    local tn = predBuf[head].t
+    local sw0,sw1,sw2,sw3,sw4 = 0,0,0,0,0
+    local srpx,srpy,srpz = 0,0,0
+    local srspx,srspy,srspz = 0,0,0
+    local srs2px,srs2py,srs2pz = 0,0,0
+    local w = 1.0
+    for i = 0, n-1 do
+        local slot = predBuf[((head-1-i) % PRED_WINDOW)+1]
+        local s = slot.t - tn
+        local s2 = s*s
+        sw0+=w; sw1+=w*s; sw2+=w*s2
+        sw3+=w*s2*s; sw4+=w*s2*s2
+        local wpx,wpy,wpz = w*slot.px, w*slot.py, w*slot.pz
+        srpx+=wpx; srpy+=wpy; srpz+=wpz
+        srspx+=wpx*s; srspy+=wpy*s; srspz+=wpz*s
+        srs2px+=wpx*s2; srs2py+=wpy*s2; srs2pz+=wpz*s2
+        w *= PRED_DECAY
+    end
+    local c00 = sw2*sw4 - sw3*sw3
+    local c01 = sw3*sw2 - sw1*sw4
+    local c02 = sw1*sw3 - sw2*sw2
+    local det = sw0*c00 + sw1*c01 + sw2*c02
+    if math.abs(det) < 1e-9 then return end
+    local inv = 1/det
+    local c10 = sw3*sw2 - sw1*sw4
+    local c11 = sw0*sw4 - sw2*sw2
+    local c12 = sw1*sw2 - sw0*sw3
+    local c20 = sw1*sw3 - sw2*sw2
+    local c21 = sw2*sw1 - sw0*sw3
+    local c22 = sw0*sw2 - sw1*sw1
+    local function solveVelAccel(b0,b1,b2)
+        return (b0*c10+b1*c11+b2*c12)*inv,
+               (b0*c20+b1*c21+b2*c22)*inv*2
+    end
+    local fvx,fax = solveVelAccel(srpx,srspx,srs2px)
+    local fvy,fay = solveVelAccel(srpy,srspy,srs2py)
+    local fvz,faz = solveVelAccel(srpz,srspz,srs2pz)
+    local jdx,jdy,jdz = fax-kAx,fay-kAy,faz-kAz
+    local dtSample = math.max(n>=2 and (tn-predBuf[((head-2)%PRED_WINDOW)+1].t) or 1, 1e-4)
+    local jerk = math.sqrt(jdx*jdx+jdy*jdy+jdz*jdz)/dtSample
+    if jerk > PRED_JERK_MAX then predConf = math.max(predConf-0.4,0) end
+    local trust = math.clamp(n/PRED_WINDOW, 0.2, 1.0)
+    local tv,ta = trust*0.8, trust*0.5
+    kVx+=(fvx-kVx)*tv; kVy+=(fvy-kVy)*tv; kVz+=(fvz-kVz)*tv
+    kAx+=(fax-kAx)*ta; kAy+=(fay-kAy)*ta; kAz+=(faz-kAz)*ta
+    kPx=predBuf[head].px; kPy=predBuf[head].py; kPz=predBuf[head].pz
+    kReady = true
+    predConf = math.min(predConf+0.25, 1.0)
+end
+
+local function predUpdate(pos)
+    local now = tick()
+    local px,py,pz = pos.X, pos.Y, pos.Z
+    if lastPredPos and lastPredTime then
+        local dt = now - lastPredTime
+        if dt > 0 and dt < 0.5 then
+            kVx += ((px-lastPredPos.X)/dt - kVx)*0.5
+            kVy += ((py-lastPredPos.Y)/dt - kVy)*0.5
+            kVz += ((pz-lastPredPos.Z)/dt - kVz)*0.5
+        end
+    end
+    lastPredPos = pos
+    lastPredTime = now
+    if predBufN > 0 then
+        local s = predBuf[predBufHead]
+        local dx,dy,dz = px-s.px, py-s.py, pz-s.pz
+        if dx*dx+dy*dy+dz*dz > PRED_TP_DIST*PRED_TP_DIST then
+            predReset()
+            return
+        end
+    end
+    predBufHead = (predBufHead % PRED_WINDOW)+1
+    local slot = predBuf[predBufHead]
+    slot.px,slot.py,slot.pz,slot.t = px,py,pz,now
+    predBufN = math.min(predBufN+1, PRED_WINDOW)
+    predFitWindow()
+end
+
+local function predExtrapolate(ahead)
+    if not kReady then return Vector3.new(kPx,kPy,kPz) end
+    local c = predConf
+    local aDecay = math.max(1-ahead*0.8, 0)
+    local h2 = 0.5*ahead*ahead
+    local px = kPx+kVx*ahead*c+kAx*h2*aDecay*c
+    local py = kPy+kVy*ahead*c+kAy*h2*aDecay*c
+    local pz = kPz+kVz*ahead*c+kAz*h2*aDecay*c
+    local blend = math.clamp(c*1.5, 0, 1)
+    return Vector3.new(
+        kPx+(px-kPx)*blend,
+        kPy+(py-kPy)*blend,
+        kPz+(pz-kPz)*blend
+    )
+end
+
+local function predLookAhead()
+    if not orbitAutoPrediction then return PredictionStrength end
+    local spd = math.sqrt(kVx*kVx+kVy*kVy+kVz*kVz)
+    local acc = math.sqrt(kAx*kAx+kAy*kAy+kAz*kAz)
+    return math.clamp(
+        (math.clamp(spd/300,0,0.8) + math.clamp(acc/400,0,0.3)) * predConf,
+        0, 0.3
+    )
+end
+
+local function getPredictedPos(fallbackPos)
+    if not KalmanPredEnabled or not kReady or predConf < 0.15 then
+        return fallbackPos
+    end
+    local predicted = predExtrapolate(predLookAhead())
+    if (predicted - fallbackPos).Magnitude > 250 then
+        return fallbackPos
+    end
+    return predicted
+end
 
 local Players = game:GetService("Players")
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
@@ -426,6 +226,67 @@ local lp = Players.LocalPlayer
 local Net = ReplicatedStorage.Modules.Net
 local RegisterHit = Net["RE/RegisterHit"]
 local RegisterAttack = Net["RE/RegisterAttack"]
+
+local function startPredFeed(playerName)
+    if predFeedConnection then predFeedConnection:Disconnect() predFeedConnection = nil end
+    if not playerName or playerName == "None" then return end
+    predReset()
+    currentPredTarget = playerName
+
+    local function connectToChar(char)
+        if not char then return end
+        local tHRP = char:FindFirstChild("HumanoidRootPart")
+            or char:FindFirstChild("UpperTorso")
+        if not tHRP then return end
+        if predFeedConnection then predFeedConnection:Disconnect() end
+        predReset()
+        predFeedConnection = RunService.Heartbeat:Connect(function()
+            if not KalmanPredEnabled then return end
+            if currentPredTarget ~= playerName then
+                predFeedConnection:Disconnect()
+                predFeedConnection = nil
+                return
+            end
+            local target = Players:FindFirstChild(playerName)
+            if not target then return end
+            local c = target.Character
+            if not c then return end
+            local hrp = c:FindFirstChild("HumanoidRootPart")
+                or c:FindFirstChild("UpperTorso")
+            if hrp then
+                predUpdate(hrp.Position)
+            end
+        end)
+    end
+
+    local target = Players:FindFirstChild(playerName)
+    if not target then return end
+    connectToChar(target.Character)
+    target.CharacterAdded:Connect(function(newChar)
+        if currentPredTarget ~= playerName then return end
+        newChar:WaitForChild("HumanoidRootPart", 5)
+        connectToChar(newChar)
+        Rayfield:Notify({
+            Title = "Prediction Reset",
+            Content = playerName .. " respawned, resyncing...",
+            Duration = 2,
+            Image = 4483362458
+        })
+    end)
+end
+
+local function stopPredFeed()
+    if predFeedConnection then predFeedConnection:Disconnect() predFeedConnection = nil end
+    predReset()
+    currentPredTarget = nil
+end
+
+-- ════════════════════════════════════════
+--  SPEED BOOST
+-- ════════════════════════════════════════
+local SpeedEnabled = false
+local SpeedValue   = 1
+local SpeedConnection
 
 local function setSpeed(value)
     SpeedEnabled = value
@@ -445,8 +306,11 @@ local function setSpeed(value)
     end
 end
 
+-- ════════════════════════════════════════
+--  COLLIDE HELPERS
+-- ════════════════════════════════════════
 local function SetCollide()
-    local character = Players.LocalPlayer.Character
+    local character = lp.Character
     if not character then return end
     for _, v in ipairs(character:GetChildren()) do
         if v:IsA("BasePart") then
@@ -458,7 +322,7 @@ local function SetCollide()
 end
 
 local function SetNoCollide()
-    local character = Players.LocalPlayer.Character
+    local character = lp.Character
     if not character then return end
     for _, v in ipairs(character:GetChildren()) do
         if v:IsA("BasePart") then
@@ -469,6 +333,9 @@ local function SetNoCollide()
     end
 end
 
+-- ════════════════════════════════════════
+--  TWEEN TP
+-- ════════════════════════════════════════
 local function TP(targetHRP)
     local player = Players.LocalPlayer
     if not player.Character then return end
@@ -480,19 +347,7 @@ local function TP(targetHRP)
     HRP.AssemblyAngularVelocity = Vector3.zero
     Humanoid:ChangeState(Enum.HumanoidStateType.Physics)
 
-    local targetPos = targetHRP.Position
-
-    if KalmanPredEnabled then
-        predUpdate(targetHRP.Position)
-        if kReady and predConf > 0.15 then
-            local predicted, conf = predExtrapolate(predLookAhead())
-            if (predicted - targetHRP.Position).Magnitude < 200 then
-                targetPos = predicted
-            end
-        end
-    else
-        targetPos = targetHRP.Position + (targetHRP.Velocity * PredictionStrength)
-    end
+    local targetPos = getPredictedPos(targetHRP.Position)
 
     local targetCFrame =
         CFrame.new(targetPos)
@@ -505,7 +360,6 @@ local function TP(targetHRP)
         (targetCFrame.Position.Z - HRP.Position.Z)^2
     )
     local verticalDist = math.abs(targetCFrame.Position.Y - HRP.Position.Y)
-
     local speed = TweenSpeed.X
     if verticalDist > horizontalDist then speed = TweenSpeed.Y end
 
@@ -535,13 +389,16 @@ local function TP(targetHRP)
     end)
 end
 
+-- ════════════════════════════════════════
+--  HELPERS
+-- ════════════════════════════════════════
 local function GetNearestPlayer()
-    local myChar = Players.LocalPlayer.Character
+    local myChar = lp.Character
     local myHRP = myChar and myChar:FindFirstChild("HumanoidRootPart")
     if not myHRP then return nil end
     local nearestPlayer, shortestDistance = nil, math.huge
     for _, player in pairs(Players:GetPlayers()) do
-        if player ~= Players.LocalPlayer and player.Character then
+        if player ~= lp and player.Character then
             local hrp = player.Character:FindFirstChild("HumanoidRootPart")
             local humanoid = player.Character:FindFirstChild("Humanoid")
             if hrp and humanoid and humanoid.Health > 0 then
@@ -559,12 +416,27 @@ end
 local function GetPlayerList()
     local list = {}
     for _, p in pairs(Players:GetPlayers()) do
-        if p ~= Players.LocalPlayer then table.insert(list, p.Name) end
+        if p ~= lp then table.insert(list, p.Name) end
     end
     if #list == 0 then table.insert(list, "None") end
     return list
 end
 
+local function GetPlayerFruit()
+    for _, item in ipairs(lp.Backpack:GetChildren()) do
+        if item:GetAttribute("WeaponType") == "Demon Fruit" then return item end
+    end
+    if lp.Character then
+        for _, item in ipairs(lp.Character:GetChildren()) do
+            if item:GetAttribute("WeaponType") == "Demon Fruit" then return item end
+        end
+    end
+    return nil
+end
+
+-- ════════════════════════════════════════
+--  TELEPORT FUNCTIONS
+-- ════════════════════════════════════════
 local function StartTeleporting()
     if TeleportConnection then TeleportConnection:Disconnect() end
     TeleportConnection = RunService.Heartbeat:Connect(function()
@@ -583,57 +455,19 @@ local function StartInstaTeleporting()
     InstaTpConnection = RunService.Stepped:Connect(function()
         if not InstaTeleportEnabled or not SelectedPlayer or SafeZoneActive then return end
         pcall(function()
-            local LocalPlayer = Players.LocalPlayer
-            local char = LocalPlayer.Character
+            local char = lp.Character
             local target = Players:FindFirstChild(SelectedPlayer)
             if char and target and target.Character then
                 local hrp = char:FindFirstChild("HumanoidRootPart")
-                local targetHRP = target.Character:FindFirstChild("UpperTorso")
+                local targetHRP = target.Character:FindFirstChild("HumanoidRootPart")
+                    or target.Character:FindFirstChild("UpperTorso")
                 if hrp and targetHRP then
-                    local tpPos = targetHRP.Position
-
-                    if KalmanPredEnabled then
-                        predUpdate(targetHRP.Position)
-                        if kReady and predConf > 0.15 then
-                            local predicted, conf = predExtrapolate(predLookAhead())
-                            if (predicted - targetHRP.Position).Magnitude < 200 then
-                                tpPos = predicted
-                            end
-                        end
-                    else
-                        if not PlayerPositionHistory[SelectedPlayer] then
-                            PlayerPositionHistory[SelectedPlayer] = {positions={}, timestamps={}}
-                        end
-                        local history = PlayerPositionHistory[SelectedPlayer]
-                        local currentTime = tick()
-                        table.insert(history.positions, targetHRP.Position)
-                        table.insert(history.timestamps, currentTime)
-                        while #history.positions > PREDICTION_SAMPLES do
-                            table.remove(history.positions, 1)
-                            table.remove(history.timestamps, 1)
-                        end
-                        if #history.positions >= 2 then
-                            local totalDisplacement = Vector3.new(0,0,0)
-                            local totalTime = 0
-                            for i = 2, #history.positions do
-                                local displacement = history.positions[i] - history.positions[i-1]
-                                local deltaTime = history.timestamps[i] - history.timestamps[i-1]
-                                if deltaTime > 0 then
-                                    totalDisplacement += displacement
-                                    totalTime += deltaTime
-                                end
-                            end
-                            if totalTime > 0 then
-                                tpPos = targetHRP.Position + (totalDisplacement/totalTime) * PREDICTION_TIME
-                            end
-                        end
-                    end
-
-                    hrp.CFrame = CFrame.new(tpPos) * CFrame.new(XOffset or 0, YOffset or 0, ZOffset or 0)
+                    local tpPos = getPredictedPos(targetHRP.Position)
+                    hrp.CFrame = CFrame.new(tpPos) * CFrame.new(XOffset, YOffset, ZOffset)
                 end
             else
-                PlayerPositionHistory[SelectedPlayer] = nil
                 if KalmanPredEnabled then predReset() end
+                PlayerPositionHistory[SelectedPlayer] = nil
             end
         end)
     end)
@@ -671,60 +505,86 @@ function StopSpectating()
     OriginalCamera = nil
 end
 
-local function GetPlayerFruit()
-    for _, item in ipairs(lp.Backpack:GetChildren()) do
-        if item:GetAttribute("WeaponType") == "Demon Fruit" then return item end
-    end
-    if lp.Character then
-        for _, item in ipairs(lp.Character:GetChildren()) do
-            if item:GetAttribute("WeaponType") == "Demon Fruit" then return item end
+-- ════════════════════════════════════════
+--  ATTACK HELPER
+-- ════════════════════════════════════════
+local function AttackMultipleTargets(targets)
+    pcall(function()
+        if not targets or #targets == 0 then return end
+        local allTargets = {}
+        for _, targetChar in pairs(targets) do
+            local head = targetChar:FindFirstChild("Head")
+            if head then table.insert(allTargets, {targetChar, head}) end
         end
-    end
-    return nil
+        if #allTargets == 0 then return end
+        RegisterAttack:FireServer(0)
+        RegisterHit:FireServer(allTargets[1][2], allTargets)
+    end)
 end
 
-local Tab  = Window:CreateTab("Players", "gem")
-local Tab2 = Window:CreateTab("Killaura", "gem")
-local Tab3 = Window:CreateTab("Killaura NPCs", "gem")
-local Tab4 = Window:CreateTab("Misc", "gem")
-local Tab5 = Window:CreateTab("Teleports", "gem")
-local Tab6 = Window:CreateTab("ESP", "gem")
-local Server  = Window:CreateTab("Server", "gem")
-local TabBoat = Window:CreateTab("Boat", "gem")
-local Oneshots = Window:CreateTab("Funny", "gem")
+local function IsInCombat()
+    local pg = lp:FindFirstChild("PlayerGui")
+    if not pg then return false end
+    local mg = pg:FindFirstChild("Main")
+    if not mg then return false end
+    local bh = mg:FindFirstChild("BottomHUDList")
+    if not bh then return false end
+    local ic = bh:FindFirstChild("InCombat")
+    if not ic then return false end
+    return ic.Visible
+end
 
-Tab6:CreateToggle({Name="Enable ESP", CurrentValue=false, Callback=function(v) ESPEnabled=v end})
-Tab6:CreateToggle({Name="Boxes", CurrentValue=false, Callback=function(v) ESPBoxes=v end})
-Tab6:CreateToggle({Name="Names", CurrentValue=false, Callback=function(v) ESPNames=v end})
-Tab6:CreateToggle({Name="Distance", CurrentValue=false, Callback=function(v) ESPDistance=v end})
-Tab6:CreateToggle({Name="Sword Dealer ESP", CurrentValue=true, Callback=function(v) SwordDealerESP=v end})
+-- ════════════════════════════════════════
+--  TABS
+-- ════════════════════════════════════════
+local Tab      = Window:CreateTab("Players",         "gem")
+local Tab2     = Window:CreateTab("Killaura",        "gem")
+local Tab3     = Window:CreateTab("Killaura (NPCs)", "gem")
+local Tab4     = Window:CreateTab("Misc",            "gem")
+local Tab5     = Window:CreateTab("Teleports",       "gem")
+local Tab6     = Window:CreateTab("ESP",             "gem")
+local Server   = Window:CreateTab("Server",          "gem")
+local TabBoat  = Window:CreateTab("Boat",            "gem")
+local Oneshots = Window:CreateTab("Funny",           "gem")
+
+-- ════════════════════════════════════════
+--  ESP TAB
+-- ════════════════════════════════════════
+Tab6:CreateToggle({Name="Enable ESP",      CurrentValue=false, Callback=function(v) ESPEnabled=v end})
+Tab6:CreateToggle({Name="Boxes",           CurrentValue=false, Callback=function(v) ESPBoxes=v end})
+Tab6:CreateToggle({Name="Names",           CurrentValue=false, Callback=function(v) ESPNames=v end})
+Tab6:CreateToggle({Name="Distance",        CurrentValue=false, Callback=function(v) ESPDistance=v end})
+Tab6:CreateToggle({Name="Sword Dealer ESP",CurrentValue=true,  Callback=function(v) SwordDealerESP=v end})
 Tab6:CreateSlider({
     Name="Max Distance", Range={100,99999999}, Increment=100, CurrentValue=99999999,
     Callback=function(v) ESPMaxDistance=v end
 })
 
 local Camera = workspace.CurrentCamera
-local LocalPlayer = Players.LocalPlayer
+local LocalPlayer = lp
 local ESPObjects = {}
 local SwordDealerESPObjects = {}
 
-local function NewDraw(type, props)
-    local d = Drawing.new(type)
+local function NewDraw(t, props)
+    local d = Drawing.new(t)
     for i,v in pairs(props) do d[i]=v end
     return d
 end
+
 local function ClearESP(plr)
     if ESPObjects[plr] then
         for _,obj in pairs(ESPObjects[plr]) do obj:Remove() end
         ESPObjects[plr] = nil
     end
 end
+
 local function ClearSwordDealerESP(obj)
     if SwordDealerESPObjects[obj] then
         for _,espObj in pairs(SwordDealerESPObjects[obj]) do espObj:Remove() end
         SwordDealerESPObjects[obj] = nil
     end
 end
+
 local function GetLevel(plr)
     local data = plr:FindFirstChild("Data")
     if data then
@@ -733,6 +593,7 @@ local function GetLevel(plr)
     end
     return nil
 end
+
 local function GetExactLocation(plr)
     local attr = plr:GetAttribute("ExactLocation")
     if attr ~= nil then return tostring(attr) end
@@ -770,8 +631,8 @@ RunService.RenderStepped:Connect(function()
     for _,plr in ipairs(Players:GetPlayers()) do
         if plr == LocalPlayer then ClearESP(plr) continue end
         local char = plr.Character
-        local hrp = char and char:FindFirstChild("HumanoidRootPart")
-        local hum = char and char:FindFirstChild("Humanoid")
+        local hrp  = char and char:FindFirstChild("HumanoidRootPart")
+        local hum  = char and char:FindFirstChild("Humanoid")
         if not ESPEnabled or not hrp or not hum or hum.Health <= 0 then ClearESP(plr) continue end
         local dist = (Camera.CFrame.Position - hrp.Position).Magnitude
         if dist > ESPMaxDistance then ClearESP(plr) continue end
@@ -807,9 +668,9 @@ RunService.RenderStepped:Connect(function()
         if SwordDealerESP then
             local obj1 = ReplicatedStorage.NPCs:FindFirstChild("Legendary Sword Dealer ")
             if obj1 then UpdateSwordDealerESP(obj1) end
-            local enemiesFolder = workspace:FindFirstChild("Enemies")
-            if enemiesFolder then
-                local obj2 = enemiesFolder:FindFirstChild("Legendary Sword Dealer ")
+            local ef = workspace:FindFirstChild("Enemies")
+            if ef then
+                local obj2 = ef:FindFirstChild("Legendary Sword Dealer ")
                 if obj2 then UpdateSwordDealerESP(obj2) end
             end
         else
@@ -820,6 +681,9 @@ end)
 
 Players.PlayerRemoving:Connect(ClearESP)
 
+-- ════════════════════════════════════════
+--  PLAYERS TAB
+-- ════════════════════════════════════════
 local PlayerDropdown = Tab:CreateDropdown({
     Name = "Player Selection",
     Options = GetPlayerList(),
@@ -828,17 +692,13 @@ local PlayerDropdown = Tab:CreateDropdown({
     Callback = function(opt)
         if type(opt) == "table" then opt = opt[1] end
         SelectedPlayer = (opt ~= "None") and opt or nil
-        if KalmanPredEnabled then predReset() end
+        if KalmanPredEnabled and SelectedPlayer then
+            startPredFeed(SelectedPlayer)
+        else
+            stopPredFeed()
+        end
     end,
 })
-
-task.spawn(function()
-    while wait(2) do
-        pcall(function()
-            PlayerDropdown:Refresh(GetPlayerList(), true)
-        end)
-    end
-end)
 
 Tab:CreateToggle({
     Name = "Tween To Player", CurrentValue = false, Flag = "TPToggle",
@@ -874,40 +734,38 @@ Tab:CreateToggle({
     end,
 })
 
+Tab:CreateButton({
+    Name = "Refrescar Lista",
+    Callback = function() PlayerDropdown:Refresh(GetPlayerList(), true) end
+})
+
 Tab:CreateSlider({Name="X Offset", Range={-50,50}, Increment=1, CurrentValue=0, Flag="XOffsetSlider", Callback=function(v) XOffset=v end})
 Tab:CreateSlider({Name="Y Offset", Range={0,250},  Increment=1, CurrentValue=0, Flag="YOffsetSlider", Callback=function(v) YOffset=v end})
 Tab:CreateSlider({Name="Z Offset", Range={-50,50}, Increment=1, CurrentValue=0, Flag="ZOffsetSlider", Callback=function(v) ZOffset=v end})
 
 Tab:CreateSection("Prediction")
 Tab:CreateToggle({
-    Name = "Ultimate Kalman Prediction", CurrentValue = false, Flag = "KalmanPredToggle",
+    Name = "Kalman Prediction", CurrentValue = false, Flag = "KalmanPredToggle",
     Callback = function(v)
         KalmanPredEnabled = v
         orbitAutoPrediction = true
-        predReset()
+        if v and SelectedPlayer then
+            startPredFeed(SelectedPlayer)
+        else
+            stopPredFeed()
+        end
     end
 })
 Tab:CreateSlider({
-    Name = "Simple Prediction", Range={0,10}, Increment=0.1, CurrentValue=0, Flag="PredictionSlider",
+    Name = "Simple Prediction (fallback)", Range={0,10}, Increment=0.1, CurrentValue=0, Flag="PredictionSlider",
     Callback = function(v) PredictionStrength = v end
 })
 
-local function AttackMultipleTargets(targets)
-    pcall(function()
-        if not targets or #targets == 0 then return end
-        local allTargets = {}
-        for _, targetChar in pairs(targets) do
-            local head = targetChar:FindFirstChild("Head")
-            if head then table.insert(allTargets, {targetChar, head}) end
-        end
-        if #allTargets == 0 then return end
-        RegisterAttack:FireServer(0)
-        RegisterHit:FireServer(allTargets[1][2], allTargets)
-    end)
-end
-
+-- ════════════════════════════════════════
+--  KILLAURA TAB (Players)
+-- ════════════════════════════════════════
 Tab2:CreateToggle({
-    Name="Fast Attack", CurrentValue=false,
+    Name="Fast Attack (Players)", CurrentValue=false,
     Callback=function(v)
         FastAttackEnabled = v
         if v then
@@ -915,18 +773,16 @@ Tab2:CreateToggle({
             FastAttackConnection = task.spawn(function()
                 while FastAttackEnabled do
                     task.wait(0.01)
-                    local myChar = Players.LocalPlayer.Character
-                    local myHRP = myChar and myChar:FindFirstChild("HumanoidRootPart")
+                    local myChar = lp.Character
+                    local myHRP  = myChar and myChar:FindFirstChild("HumanoidRootPart")
                     if not myHRP then continue end
                     local targetsInRange = {}
                     for _, player in pairs(Players:GetPlayers()) do
-                        if player ~= Players.LocalPlayer and player.Character then
-                            local humanoid = player.Character:FindFirstChild("Humanoid")
+                        if player ~= lp and player.Character then
+                            local h   = player.Character:FindFirstChild("Humanoid")
                             local hrp = player.Character:FindFirstChild("HumanoidRootPart")
-                            if humanoid and hrp and humanoid.Health > 0 then
-                                if (hrp.Position-myHRP.Position).Magnitude <= FastAttackRange then
-                                    table.insert(targetsInRange, player.Character)
-                                end
+                            if h and hrp and h.Health > 0 and (hrp.Position-myHRP.Position).Magnitude <= FastAttackRange then
+                                table.insert(targetsInRange, player.Character)
                             end
                         end
                     end
@@ -940,7 +796,7 @@ Tab2:CreateToggle({
 })
 
 Tab2:CreateToggle({
-    Name="Fruit Aura", CurrentValue=false,
+    Name="Fruit Aura (Auto-Detect)", CurrentValue=false,
     Callback=function(v)
         FruitAttack = v
         if v then
@@ -952,13 +808,14 @@ Tab2:CreateToggle({
                     if fruit then
                         local remote = fruit:FindFirstChild("LeftClickRemote")
                         if remote then
-                            local targetPlayer = GetNearestPlayer()
                             local dir = vector.create(0.12, -0.5, -0.1)
-                            if targetPlayer and targetPlayer.Character then
+                            local tp  = GetNearestPlayer()
+                            if tp and tp.Character then
                                 local myHRP = lp.Character and lp.Character:FindFirstChild("HumanoidRootPart")
-                                local tHRP  = targetPlayer.Character:FindFirstChild("HumanoidRootPart")
+                                local tHRP  = tp.Character:FindFirstChild("HumanoidRootPart")
                                 if myHRP and tHRP then
-                                    local d = (tHRP.Position - myHRP.Position).Unit
+                                    local aimPos = getPredictedPos(tHRP.Position)
+                                    local d = (aimPos - myHRP.Position).Unit
                                     dir = vector.create(d.X, d.Y, d.Z)
                                 end
                             end
@@ -974,21 +831,22 @@ Tab2:CreateToggle({
 })
 
 Tab2:CreateToggle({
-    Name="Fruit Attack Kitsune", CurrentValue=false,
-    Callback=function(vatt)
-        FruitAttack=vatt
-        if vatt then
+    Name="Fruit Attack (Kitsune)", CurrentValue=false,
+    Callback=function(v)
+        FruitAttack=v
+        if v then
             if FruitAttackConnection then task.cancel(FruitAttackConnection) end
             FruitAttackConnection=task.spawn(function()
                 while FruitAttack do
                     task.wait(0.01)
                     local tp=GetNearestPlayer()
                     if tp and tp.Character then
-                        local a67=Players.LocalPlayer.Character.HumanoidRootPart
-                        local b67=tp.Character.HumanoidRootPart
-                        if a67 and b67 then
-                            local d=(b67.Position-a67.Position).Unit
-                            Players.LocalPlayer.Character:WaitForChild("Kitsune-Kitsune"):WaitForChild("LeftClickRemote"):FireServer(vector.create(d.X,d.Y,d.Z),1,true)
+                        local myHRP=lp.Character and lp.Character:FindFirstChild("HumanoidRootPart")
+                        local tHRP=tp.Character:FindFirstChild("HumanoidRootPart")
+                        if myHRP and tHRP then
+                            local aimPos=getPredictedPos(tHRP.Position)
+                            local d=(aimPos-myHRP.Position).Unit
+                            pcall(function() lp.Character:WaitForChild("Kitsune-Kitsune"):WaitForChild("LeftClickRemote"):FireServer(vector.create(d.X,d.Y,d.Z),1,true) end)
                         end
                     end
                 end
@@ -1000,7 +858,7 @@ Tab2:CreateToggle({
 })
 
 Tab2:CreateToggle({
-    Name="Fruit Attack Gas", CurrentValue=false,
+    Name="Fruit Attack (Gas)", CurrentValue=false,
     Callback=function(v)
         FruitAttack=v
         if v then
@@ -1010,11 +868,12 @@ Tab2:CreateToggle({
                     task.wait(0.01)
                     local tp=GetNearestPlayer()
                     if tp and tp.Character then
-                        local a=Players.LocalPlayer.Character.HumanoidRootPart
-                        local b=tp.Character.HumanoidRootPart
-                        if a and b then
-                            local d=(b.Position-a.Position).Unit
-                            Players.LocalPlayer.Character:WaitForChild("Gas-Gas"):WaitForChild("LeftClickRemote"):FireServer(vector.create(d.X,d.Y,d.Z),1,true)
+                        local myHRP=lp.Character and lp.Character:FindFirstChild("HumanoidRootPart")
+                        local tHRP=tp.Character:FindFirstChild("HumanoidRootPart")
+                        if myHRP and tHRP then
+                            local aimPos=getPredictedPos(tHRP.Position)
+                            local d=(aimPos-myHRP.Position).Unit
+                            pcall(function() lp.Character:WaitForChild("Gas-Gas"):WaitForChild("LeftClickRemote"):FireServer(vector.create(d.X,d.Y,d.Z),1,true) end)
                         end
                     end
                 end
@@ -1026,7 +885,7 @@ Tab2:CreateToggle({
 })
 
 Tab2:CreateToggle({
-    Name="Fruit Attack Empyrean Kitsune", CurrentValue=false,
+    Name="Fruit Attack (Empyrean-Kitsune)", CurrentValue=false,
     Callback=function(v)
         FruitAttack=v
         if v then
@@ -1036,11 +895,12 @@ Tab2:CreateToggle({
                     task.wait(0.01)
                     local tp=GetNearestPlayer()
                     if tp and tp.Character then
-                        local a=Players.LocalPlayer.Character.HumanoidRootPart
-                        local b=tp.Character.HumanoidRootPart
-                        if a and b then
-                            local d=(b.Position-a.Position).Unit
-                            Players.LocalPlayer.Character:WaitForChild("Empyrean (Kitsune)-Empyrean (Kitsune)"):WaitForChild("LeftClickRemote"):FireServer(vector.create(d.X,d.Y,d.Z),4,true)
+                        local myHRP=lp.Character and lp.Character:FindFirstChild("HumanoidRootPart")
+                        local tHRP=tp.Character:FindFirstChild("HumanoidRootPart")
+                        if myHRP and tHRP then
+                            local aimPos=getPredictedPos(tHRP.Position)
+                            local d=(aimPos-myHRP.Position).Unit
+                            pcall(function() lp.Character:WaitForChild("Empyrean (Kitsune)-Empyrean (Kitsune)"):WaitForChild("LeftClickRemote"):FireServer(vector.create(d.X,d.Y,d.Z),4,true) end)
                         end
                     end
                 end
@@ -1052,7 +912,7 @@ Tab2:CreateToggle({
 })
 
 Tab2:CreateToggle({
-    Name="Fruit Attack Control", CurrentValue=false,
+    Name="Fruit Attack (Control)", CurrentValue=false,
     Callback=function(v)
         FruitAttack=v
         if v then
@@ -1062,11 +922,12 @@ Tab2:CreateToggle({
                     task.wait(0.01)
                     local tp=GetNearestPlayer()
                     if tp and tp.Character then
-                        local a=Players.LocalPlayer.Character.HumanoidRootPart
-                        local b=tp.Character.HumanoidRootPart
-                        if a and b then
-                            local d=(b.Position-a.Position).Unit
-                            Players.LocalPlayer.Character:WaitForChild("Control-Control"):WaitForChild("LeftClickRemote"):FireServer(vector.create(d.X,d.Y,d.Z),1,true)
+                        local myHRP=lp.Character and lp.Character:FindFirstChild("HumanoidRootPart")
+                        local tHRP=tp.Character:FindFirstChild("HumanoidRootPart")
+                        if myHRP and tHRP then
+                            local aimPos=getPredictedPos(tHRP.Position)
+                            local d=(aimPos-myHRP.Position).Unit
+                            pcall(function() lp.Character:WaitForChild("Control-Control"):WaitForChild("LeftClickRemote"):FireServer(vector.create(d.X,d.Y,d.Z),1,true) end)
                         end
                     end
                 end
@@ -1078,7 +939,7 @@ Tab2:CreateToggle({
 })
 
 Tab2:CreateToggle({
-    Name="Fruit Attack Pain", CurrentValue=false,
+    Name="Fruit Attack (Pain)", CurrentValue=false,
     Callback=function(v)
         FruitAttack=v
         if v then
@@ -1088,11 +949,12 @@ Tab2:CreateToggle({
                     task.wait(0.01)
                     local tp=GetNearestPlayer()
                     if tp and tp.Character then
-                        local a=Players.LocalPlayer.Character.HumanoidRootPart
-                        local b=tp.Character.HumanoidRootPart
-                        if a and b then
-                            local d=(b.Position-a.Position).Unit
-                            Players.LocalPlayer.Character:WaitForChild("Pain-Pain"):WaitForChild("LeftClickRemote"):FireServer(vector.create(d.X,0,d.Z),1,true)
+                        local myHRP=lp.Character and lp.Character:FindFirstChild("HumanoidRootPart")
+                        local tHRP=tp.Character:FindFirstChild("HumanoidRootPart")
+                        if myHRP and tHRP then
+                            local aimPos=getPredictedPos(tHRP.Position)
+                            local d=(aimPos-myHRP.Position).Unit
+                            pcall(function() lp.Character:WaitForChild("Pain-Pain"):WaitForChild("LeftClickRemote"):FireServer(vector.create(d.X,0,d.Z),1,true) end)
                         end
                     end
                 end
@@ -1104,7 +966,7 @@ Tab2:CreateToggle({
 })
 
 Tab2:CreateToggle({
-    Name="Fruit Attack Dragon", CurrentValue=false,
+    Name="Fruit Attack (Dragon)", CurrentValue=false,
     Callback=function(v)
         FruitAttack=v
         if v then
@@ -1114,11 +976,12 @@ Tab2:CreateToggle({
                     task.wait(0.01)
                     local tp=GetNearestPlayer()
                     if tp and tp.Character then
-                        local a=Players.LocalPlayer.Character.HumanoidRootPart
-                        local b=tp.Character.HumanoidRootPart
-                        if a and b then
-                            local d=(b.Position-a.Position).Unit
-                            Players.LocalPlayer.Character:WaitForChild("Dragon-Dragon"):WaitForChild("LeftClickRemote"):FireServer(vector.create(d.X,d.Y,d.Z),1)
+                        local myHRP=lp.Character and lp.Character:FindFirstChild("HumanoidRootPart")
+                        local tHRP=tp.Character:FindFirstChild("HumanoidRootPart")
+                        if myHRP and tHRP then
+                            local aimPos=getPredictedPos(tHRP.Position)
+                            local d=(aimPos-myHRP.Position).Unit
+                            pcall(function() lp.Character:WaitForChild("Dragon-Dragon"):WaitForChild("LeftClickRemote"):FireServer(vector.create(d.X,d.Y,d.Z),1) end)
                         end
                     end
                 end
@@ -1130,7 +993,7 @@ Tab2:CreateToggle({
 })
 
 Tab2:CreateToggle({
-    Name="Fruit Attack Tiger", CurrentValue=false,
+    Name="Fruit Attack (Tiger)", CurrentValue=false,
     Callback=function(v)
         FruitAttack=v
         if v then
@@ -1140,11 +1003,12 @@ Tab2:CreateToggle({
                     task.wait(0.01)
                     local tp=GetNearestPlayer()
                     if tp and tp.Character then
-                        local a=Players.LocalPlayer.Character.HumanoidRootPart
-                        local b=tp.Character.HumanoidRootPart
-                        if a and b then
-                            local d=(b.Position-a.Position).Unit
-                            Players.LocalPlayer.Character:WaitForChild("Tiger-Tiger"):WaitForChild("LeftClickRemote"):FireServer(vector.create(d.X,d.Y,d.Z),3)
+                        local myHRP=lp.Character and lp.Character:FindFirstChild("HumanoidRootPart")
+                        local tHRP=tp.Character:FindFirstChild("HumanoidRootPart")
+                        if myHRP and tHRP then
+                            local aimPos=getPredictedPos(tHRP.Position)
+                            local d=(aimPos-myHRP.Position).Unit
+                            pcall(function() lp.Character:WaitForChild("Tiger-Tiger"):WaitForChild("LeftClickRemote"):FireServer(vector.create(d.X,d.Y,d.Z),3) end)
                         end
                     end
                 end
@@ -1156,7 +1020,7 @@ Tab2:CreateToggle({
 })
 
 Tab2:CreateToggle({
-    Name="Fruit Attack T-Rex", CurrentValue=false,
+    Name="Fruit Attack (T-Rex)", CurrentValue=false,
     Callback=function(v)
         FruitAttack=v
         if v then
@@ -1166,11 +1030,12 @@ Tab2:CreateToggle({
                     task.wait(0.01)
                     local tp=GetNearestPlayer()
                     if tp and tp.Character then
-                        local a=Players.LocalPlayer.Character.HumanoidRootPart
-                        local b=tp.Character.HumanoidRootPart
-                        if a and b then
-                            local d=(b.Position-a.Position).Unit
-                            Players.LocalPlayer.Character:WaitForChild("T-Rex-T-Rex"):WaitForChild("LeftClickRemote"):FireServer(vector.create(d.X,d.Y,d.Z),1)
+                        local myHRP=lp.Character and lp.Character:FindFirstChild("HumanoidRootPart")
+                        local tHRP=tp.Character:FindFirstChild("HumanoidRootPart")
+                        if myHRP and tHRP then
+                            local aimPos=getPredictedPos(tHRP.Position)
+                            local d=(aimPos-myHRP.Position).Unit
+                            pcall(function() lp.Character:WaitForChild("T-Rex-T-Rex"):WaitForChild("LeftClickRemote"):FireServer(vector.create(d.X,d.Y,d.Z),1) end)
                         end
                     end
                 end
@@ -1182,7 +1047,7 @@ Tab2:CreateToggle({
 })
 
 Tab2:CreateToggle({
-    Name="Fruit Attack Gravity", CurrentValue=false,
+    Name="Fruit Attack (Gravity)", CurrentValue=false,
     Callback=function(v)
         FruitAttack=v
         if v then
@@ -1192,14 +1057,17 @@ Tab2:CreateToggle({
                     task.wait(0.01)
                     local tp=GetNearestPlayer()
                     if tp and tp.Character then
-                        local a=Players.LocalPlayer.Character.HumanoidRootPart
-                        local b=tp.Character.HumanoidRootPart
-                        if a and b then
-                            Players.LocalPlayer.Character:WaitForChild("Humanoid"):WaitForChild(""):InvokeServer(
-                                "TAP",
-                                vector.create(b.Position.X,b.Position.Y,b.Position.Z),
-                                vector.create(b.Position.X+39.6,b.Position.Y+25,b.Position.Z+50)
-                            )
+                        local myHRP=lp.Character and lp.Character:FindFirstChild("HumanoidRootPart")
+                        local tHRP=tp.Character:FindFirstChild("HumanoidRootPart")
+                        if myHRP and tHRP then
+                            local aimPos=getPredictedPos(tHRP.Position)
+                            pcall(function()
+                                lp.Character:WaitForChild("Humanoid"):WaitForChild(""):InvokeServer(
+                                    "TAP",
+                                    vector.create(aimPos.X,aimPos.Y,aimPos.Z),
+                                    vector.create(aimPos.X+39.6,aimPos.Y+25,aimPos.Z+50)
+                                )
+                            end)
                         end
                     end
                 end
@@ -1210,8 +1078,11 @@ Tab2:CreateToggle({
     end,
 })
 
+-- ════════════════════════════════════════
+--  KILLAURA (NPCs) TAB
+-- ════════════════════════════════════════
 Tab3:CreateToggle({
-    Name="Fast Attack", CurrentValue=false,
+    Name="Fast Attack (NPCs)", CurrentValue=false,
     Callback=function(v)
         FastAttackEnabled=v
         if v then
@@ -1219,7 +1090,7 @@ Tab3:CreateToggle({
             FastAttackConnection=task.spawn(function()
                 while FastAttackEnabled do
                     task.wait(0.01)
-                    local myChar=Players.LocalPlayer.Character
+                    local myChar=lp.Character
                     local myHRP=myChar and myChar:FindFirstChild("HumanoidRootPart")
                     if not myHRP then continue end
                     local targetsInRange={}
@@ -1242,16 +1113,16 @@ Tab3:CreateToggle({
     end,
 })
 
-local function makeNPCAura(toolName, slot)
+local function makeNPCAura(toolName, slot, argSlot)
     Tab3:CreateToggle({
-        Name="Fruit Attack "..toolName:match("^(.-)%-"), CurrentValue=false,
+        Name="Fruit Attack ("..toolName:match("^(.-)%-")..") [NPCs]", CurrentValue=false,
         Callback=function(v)
             if v then
                 if _G[slot] then task.cancel(_G[slot]) end
                 _G[slot]=task.spawn(function()
                     while v do
                         task.wait(0.01)
-                        local char=Players.LocalPlayer.Character
+                        local char=lp.Character
                         local hrp=char and char:FindFirstChild("HumanoidRootPart")
                         if not hrp then continue end
                         local ef=workspace:FindFirstChild("Enemies")
@@ -1262,7 +1133,7 @@ local function makeNPCAura(toolName, slot)
                             if h and nhrp and h.Health>0 and (nhrp.Position-hrp.Position).Magnitude<=50 then
                                 local d=(nhrp.Position-hrp.Position).Unit
                                 pcall(function()
-                                    char:WaitForChild(toolName):WaitForChild("LeftClickRemote"):FireServer(vector.create(d.X,d.Y,d.Z),1,true)
+                                    char:WaitForChild(toolName):WaitForChild("LeftClickRemote"):FireServer(vector.create(d.X,d.Y,d.Z),argSlot or 1,true)
                                 end)
                             end
                         end
@@ -1275,23 +1146,23 @@ local function makeNPCAura(toolName, slot)
     })
 end
 
-makeNPCAura("Kitsune-Kitsune", "KitsuneNPCLoop")
-makeNPCAura("Gas-Gas", "GasNpcLoop")
-makeNPCAura("Control-Control", "ControlFruitLoop")
-makeNPCAura("Pain-Pain", "PainNPCLoop")
-makeNPCAura("Dragon-Dragon", "DragonNPCLoop")
-makeNPCAura("Tiger-Tiger", "TigerNPCLoop")
-makeNPCAura("T-Rex-T-Rex", "trexloop1")
+makeNPCAura("Kitsune-Kitsune",   "KitsuneNPCLoop",    1)
+makeNPCAura("Gas-Gas",           "GasNpcLoop",         1)
+makeNPCAura("Control-Control",   "ControlFruitLoop",   1)
+makeNPCAura("Pain-Pain",         "PainNPCLoop",        1)
+makeNPCAura("Dragon-Dragon",     "DragonNPCLoop",      1)
+makeNPCAura("Tiger-Tiger",       "TigerNPCLoop",       3)
+makeNPCAura("T-Rex-T-Rex",       "trexloop1",          1)
 
 Tab3:CreateToggle({
-    Name="Fruit Attack Empyrean Kitsune", CurrentValue=false,
+    Name="Fruit Attack (Empyrean-Kitsune) [NPCs]", CurrentValue=false,
     Callback=function(v)
         if v then
             if _G.KitsuneNPCLoop12 then task.cancel(_G.KitsuneNPCLoop12) end
             _G.KitsuneNPCLoop12=task.spawn(function()
                 while v do
                     task.wait(0.01)
-                    local char=Players.LocalPlayer.Character
+                    local char=lp.Character
                     local hrp=char and char:FindFirstChild("HumanoidRootPart")
                     if not hrp then continue end
                     local ef=workspace:FindFirstChild("Enemies")
@@ -1301,9 +1172,7 @@ Tab3:CreateToggle({
                         local nhrp=npc:FindFirstChild("HumanoidRootPart")
                         if h and nhrp and h.Health>0 and (nhrp.Position-hrp.Position).Magnitude<=50 then
                             local d=(nhrp.Position-hrp.Position).Unit
-                            pcall(function()
-                                char:WaitForChild("Empyrean (Kitsune)-Empyrean (Kitsune)"):WaitForChild("LeftClickRemote"):FireServer(vector.create(d.X,d.Y,d.Z),4,true)
-                            end)
+                            pcall(function() char:WaitForChild("Empyrean (Kitsune)-Empyrean (Kitsune)"):WaitForChild("LeftClickRemote"):FireServer(vector.create(d.X,d.Y,d.Z),4,true) end)
                         end
                     end
                 end
@@ -1315,14 +1184,14 @@ Tab3:CreateToggle({
 })
 
 Tab3:CreateToggle({
-    Name="Fruit Attack Gravity", CurrentValue=false,
+    Name="Fruit Attack (Gravity) [NPCs]", CurrentValue=false,
     Callback=function(v)
         if v then
             if _G.GravLoop1 then task.cancel(_G.GravLoop1) end
             _G.GravLoop1=task.spawn(function()
                 while v do
                     task.wait(0.01)
-                    local char=Players.LocalPlayer.Character
+                    local char=lp.Character
                     local hrp=char and char:FindFirstChild("HumanoidRootPart")
                     if not hrp then continue end
                     local ef=workspace:FindFirstChild("Enemies")
@@ -1348,8 +1217,11 @@ Tab3:CreateToggle({
     end,
 })
 
+-- ════════════════════════════════════════
+--  MISC TAB
+-- ════════════════════════════════════════
 Tab4:CreateToggle({
-    Name="Fast Attack All", CurrentValue=false,
+    Name="Fast Attack (Players & NPCs)", CurrentValue=false,
     Callback=function(v)
         FastAttackEnabled=v
         if v then
@@ -1357,12 +1229,12 @@ Tab4:CreateToggle({
             FastAttackConnection=task.spawn(function()
                 while FastAttackEnabled do
                     task.wait(0.01)
-                    local myChar=Players.LocalPlayer.Character
+                    local myChar=lp.Character
                     local myHRP=myChar and myChar:FindFirstChild("HumanoidRootPart")
                     if not myHRP then continue end
                     local targetsInRange={}
                     for _,player in pairs(Players:GetPlayers()) do
-                        if player~=Players.LocalPlayer and player.Character then
+                        if player~=lp and player.Character then
                             local h=player.Character:FindFirstChild("Humanoid")
                             local hrp=player.Character:FindFirstChild("HumanoidRootPart")
                             if h and hrp and h.Health>0 and (hrp.Position-myHRP.Position).Magnitude<=FastAttackRange then
@@ -1392,7 +1264,7 @@ Tab4:CreateToggle({
 Tab4:CreateToggle({
     Name="Anti Mover", CurrentValue=false,
     Callback=function(v)
-        local player=Players.LocalPlayer
+        local player=lp
         if v then
             local function add(char)
                 if not char:FindFirstChild("AntiMover") then
@@ -1419,15 +1291,15 @@ Tab4:CreateToggle({
             UnbreakableConnection=task.spawn(function()
                 while Unbreakable do
                     task.wait(0.1)
-                    if Players.LocalPlayer.Character:GetAttribute("Unbreakable")~=true then
-                        Players.LocalPlayer.Character:SetAttribute("UnbreakableAll",true)
+                    if lp.Character:GetAttribute("Unbreakable")~=true then
+                        lp.Character:SetAttribute("UnbreakableAll",true)
                     end
                 end
             end)
         else
             if UnbreakableConnection then
                 task.cancel(UnbreakableConnection)
-                Players.LocalPlayer.Character:SetAttribute("UnbreakableAll",false)
+                lp.Character:SetAttribute("UnbreakableAll",false)
                 UnbreakableConnection=nil
             end
         end
@@ -1443,7 +1315,7 @@ Tab4:CreateToggle({
             v4Connection=task.spawn(function()
                 while autoV4 do
                     task.wait(0.5)
-                    Players.LocalPlayer:WaitForChild("Backpack"):WaitForChild("Awakening"):WaitForChild("RemoteFunction"):InvokeServer(true)
+                    lp:WaitForChild("Backpack"):WaitForChild("Awakening"):WaitForChild("RemoteFunction"):InvokeServer(true)
                 end
             end)
         else
@@ -1461,7 +1333,7 @@ Tab4:CreateToggle({
             DashConnection=task.spawn(function()
                 while DashEnabled do
                     task.wait(0.1)
-                    local char=Players.LocalPlayer.Character
+                    local char=lp.Character
                     if char then
                         if char:GetAttribute("DashLength")~=DashLenghtDistance420 then
                             char:SetAttribute("DashLength",DashLenghtDistance420)
@@ -1472,8 +1344,8 @@ Tab4:CreateToggle({
             end)
         else
             if DashConnection then
-                Players.LocalPlayer.Character:SetAttribute("DashLength",1)
-                Players.LocalPlayer.Character:SetAttribute("DashLengthAir",1)
+                lp.Character:SetAttribute("DashLength",1)
+                lp.Character:SetAttribute("DashLengthAir",1)
                 task.cancel(DashConnection)
                 DashConnection=nil
             end
@@ -1503,29 +1375,37 @@ Tab4:CreateSlider({
     Callback=function(v) SpeedValue=v end
 })
 
-Tab5:CreateButton({Name="Tp Mansion", Callback=function() Players.LocalPlayer.Character.HumanoidRootPart.CFrame=CFrame.new(-12463,376,-7567) end})
-Tab5:CreateButton({Name="Tp Sea 1", Callback=function() Players.LocalPlayer.Character.HumanoidRootPart.CFrame=CFrame.new(-4627.80517578125,848.0349731445312,-1706.7349853515625) end})
-Tab5:CreateButton({Name="Tp Piratiña", Callback=function() Players.LocalPlayer.Character.HumanoidRootPart.CFrame=CFrame.new(-11997,332,-8837) end})
-Tab5:CreateButton({Name="Tp V4", Callback=function()
-    local h=Players.LocalPlayer.Character.HumanoidRootPart
-    h.CFrame=CFrame.new(28286,14897,103)
-    task.wait(0.5)
-    for i=1,150 do task.wait(0.01) h.CFrame=CFrame.new(28612,14893,106) end
-end})
-Tab5:CreateButton({Name="Tp Barco", Callback=function() Players.LocalPlayer.Character.HumanoidRootPart.CFrame=CFrame.new(-6500,129,-123) end})
-Tab5:CreateButton({Name="Tp Flamingo", Callback=function() Players.LocalPlayer.Character.HumanoidRootPart.CFrame=CFrame.new(2285,38,899) end})
-Tab5:CreateButton({Name="Tp Special", Callback=function()
-    local h=Players.LocalPlayer.Character.HumanoidRootPart
-    for i=1,200 do task.wait(0.01) h.CFrame=CFrame.new(-276,49362,-35249) end
-end})
-Tab5:CreateButton({Name="Remove TouchInterest", Callback=function()
-    for _,d in pairs(game:GetDescendants()) do
-        if d:IsA("TouchTransmitter") then d:Destroy() end
+-- ════════════════════════════════════════
+--  TELEPORTS TAB
+-- ════════════════════════════════════════
+Tab5:CreateButton({Name="Tp Mansion",     Callback=function() lp.Character.HumanoidRootPart.CFrame=CFrame.new(-12463,376,-7567) end})
+Tab5:CreateButton({Name="Tp Sea 1",       Callback=function() lp.Character.HumanoidRootPart.CFrame=CFrame.new(-4627.80517578125,848.0349731445312,-1706.7349853515625) end})
+Tab5:CreateButton({Name="Tp Piratiña 67", Callback=function() lp.Character.HumanoidRootPart.CFrame=CFrame.new(-11997,332,-8837) end})
+Tab5:CreateButton({
+    Name="Tp V4", Callback=function()
+        local h=lp.Character.HumanoidRootPart
+        h.CFrame=CFrame.new(28286,14897,103)
+        task.wait(0.5)
+        for i=1,150 do task.wait(0.01) h.CFrame=CFrame.new(28612,14893,106) end
     end
-end})
-
+})
+Tab5:CreateButton({Name="Tp Barco",   Callback=function() lp.Character.HumanoidRootPart.CFrame=CFrame.new(-6500,129,-123) end})
+Tab5:CreateButton({Name="Tp Flamingo",Callback=function() lp.Character.HumanoidRootPart.CFrame=CFrame.new(2285,38,899) end})
+Tab5:CreateButton({
+    Name="Tp ???", Callback=function()
+        local h=lp.Character.HumanoidRootPart
+        for i=1,200 do task.wait(0.01) h.CFrame=CFrame.new(-276,49362,-35249) end
+    end
+})
+Tab5:CreateButton({
+    Name="Remove TouchInterest", Callback=function()
+        for _,d in pairs(game:GetDescendants()) do
+            if d:IsA("TouchTransmitter") then d:Destroy() end
+        end
+    end
+})
 Tab5:CreateToggle({
-    Name="Auto Farm Big Buddha", CurrentValue=false,
+    Name="Auto Farm (Big Buddha)", CurrentValue=false,
     Callback=function(v)
         AutoFarmPositions=v
         if v then
@@ -1539,10 +1419,15 @@ Tab5:CreateToggle({
                         if not AutoFarmPositions then break end
                         local n=tonumber(region.Name:match("%d+"))
                         if n and n>=44 and n<=67 then
-                            local hrp=Players.LocalPlayer.Character and Players.LocalPlayer.Character:FindFirstChild("HumanoidRootPart")
+                            local hrp=lp.Character and lp.Character:FindFirstChild("HumanoidRootPart")
                             if hrp then
-                                local cf=region:IsA("BasePart") and region.CFrame
-                                    or (region.PrimaryPart or region:FindFirstChildWhichIsA("BasePart")) and (region.PrimaryPart or region:FindFirstChildWhichIsA("BasePart")).CFrame
+                                local cf
+                                if region:IsA("BasePart") then
+                                    cf=region.CFrame
+                                else
+                                    local pp=region.PrimaryPart or region:FindFirstChildWhichIsA("BasePart")
+                                    if pp then cf=pp.CFrame end
+                                end
                                 if cf then
                                     local st=tick()
                                     while AutoFarmPositions and (tick()-st)<12 do
@@ -1561,6 +1446,9 @@ Tab5:CreateToggle({
     end,
 })
 
+-- ════════════════════════════════════════
+--  SERVER TAB
+-- ════════════════════════════════════════
 Server:CreateToggle({
     Name="Auto Equip Venom & Switch Team", CurrentValue=false, Flag="AutoVenomToggle",
     Callback=function(Value)
@@ -1568,7 +1456,7 @@ Server:CreateToggle({
         if autoEquipVenom then
             spawn(function()
                 while autoEquipVenom do
-                    local player=game.Players.LocalPlayer
+                    local player=lp
                     local character=player.Character
                     local backpack=player.Backpack
                     local venomFruit=backpack:FindFirstChild("Venom-Venom")
@@ -1580,7 +1468,7 @@ Server:CreateToggle({
                     while autoEquipVenom and holdDuration<10 do
                         local vim=game:GetService("VirtualInputManager")
                         vim:SendKeyEvent(true,Enum.KeyCode.F,false,game)
-                        game:GetService("ReplicatedStorage"):WaitForChild("Remotes"):WaitForChild("CommF_"):InvokeServer("SetTeam","Marines")
+                        ReplicatedStorage:WaitForChild("Remotes"):WaitForChild("CommF_"):InvokeServer("SetTeam","Marines")
                         wait(0.1)
                         holdDuration+=0.1
                         if not character or not character:FindFirstChild("HumanoidRootPart") then break end
@@ -1594,6 +1482,9 @@ Server:CreateToggle({
     end,
 })
 
+-- ════════════════════════════════════════
+--  BOAT TAB
+-- ════════════════════════════════════════
 local StopBoatTP=false
 
 TabBoat:CreateButton({
@@ -1609,12 +1500,12 @@ TabBoat:CreateButton({
         for _,boat in pairs(boats:GetChildren()) do
             if boat.Name=="PirateSloop" then
                 local owner=boat:FindFirstChild("Owner")
-                if owner and owner.Value==LocalPlayer then sleigh=boat break end
+                if owner and owner.Value==lp then sleigh=boat break end
             end
         end
         if not sleigh then return end
         local vehicleSeat=sleigh:FindFirstChild("VehicleSeat")
-        local myHRP=LocalPlayer.Character and LocalPlayer.Character:FindFirstChild("HumanoidRootPart")
+        local myHRP=lp.Character and lp.Character:FindFirstChild("HumanoidRootPart")
         if vehicleSeat and myHRP then
             repeat
                 task.wait(0.001)
@@ -1656,12 +1547,12 @@ TabBoat:CreateButton({
         for _,boat in pairs(boats:GetChildren()) do
             if boat.Name=="PirateSloop" then
                 local owner=boat:FindFirstChild("Owner")
-                if owner and owner.Value==LocalPlayer then sleigh=boat break end
+                if owner and owner.Value==lp then sleigh=boat break end
             end
         end
         if not sleigh then return end
         local vehicleSeat=sleigh:FindFirstChild("VehicleSeat")
-        local myHRP=LocalPlayer.Character and LocalPlayer.Character:FindFirstChild("HumanoidRootPart")
+        local myHRP=lp.Character and lp.Character:FindFirstChild("HumanoidRootPart")
         if vehicleSeat and myHRP then
             myHRP.CFrame=vehicleSeat.CFrame
             task.wait(0.1)
@@ -1671,7 +1562,7 @@ TabBoat:CreateButton({
 })
 
 local function BuyBoat()
-    local myHRP=Players.LocalPlayer.Character.HumanoidRootPart
+    local myHRP=lp.Character.HumanoidRootPart
     myHRP.CFrame=CFrame.new(-9534,7,-8329)
     ReplicatedStorage:WaitForChild("Remotes"):WaitForChild("CommF_"):InvokeServer("BuyBoat","PirateSloop")
 end
@@ -1697,12 +1588,12 @@ TabBoat:CreateButton({
         for _,boat in pairs(boats:GetChildren()) do
             if boat.Name=="PirateSloop" then
                 local owner=boat:FindFirstChild("Owner")
-                if owner and owner.Value==LocalPlayer then sleigh=boat break end
+                if owner and owner.Value==lp then sleigh=boat break end
             end
         end
         if not sleigh then return end
         local vehicleSeat=sleigh:FindFirstChild("VehicleSeat")
-        local myHRP=LocalPlayer.Character and LocalPlayer.Character:FindFirstChild("HumanoidRootPart")
+        local myHRP=lp.Character and lp.Character:FindFirstChild("HumanoidRootPart")
         if vehicleSeat and myHRP then
             local st=tick()
             while tick()-st<1 do
@@ -1713,28 +1604,22 @@ TabBoat:CreateButton({
     end
 })
 
-local function IsInCombat()
-    local pg=lp:FindFirstChild("PlayerGui")
-    if not pg then return false end
-    local mg=pg:FindFirstChild("Main")
-    if not mg then return false end
-    local bh=mg:FindFirstChild("BottomHUDList")
-    if not bh then return false end
-    local ic=bh:FindFirstChild("InCombat")
-    if not ic then return false end
-    return ic.Visible
-end
-
+-- ════════════════════════════════════════
+--  FUNNY TAB
+-- ════════════════════════════════════════
 Oneshots:CreateToggle({
-    Name="Spawn Abuse", CurrentValue=false,
+    Name="Spawn abuse (Enable killaura)", CurrentValue=false,
     Callback=function(v)
         TestingFarm=v
         if v then
             if TestingFarmConnection then task.cancel(TestingFarmConnection) end
+            if KalmanPredEnabled and SelectedPlayer then
+                startPredFeed(SelectedPlayer)
+            end
             TestingFarmConnection=task.spawn(function()
                 while TestingFarm do
                     task.wait(0.001)
-                    local player=Players.LocalPlayer
+                    local player=lp
                     local char=player.Character
                     if not char then continue end
                     local hrp=char:FindFirstChild("HumanoidRootPart")
@@ -1754,9 +1639,10 @@ Oneshots:CreateToggle({
                             if humanoid.Health<=0 or humanoid:GetState()==Enum.HumanoidStateType.Dead then
                                 local target=Players:FindFirstChild(SelectedPlayer)
                                 if target and target.Character then
-                                    local tHRP=target.Character:FindFirstChild("HumanoidRootPart")
-                                    if tHRP then
-                                        hrp.CFrame=tHRP.CFrame*CFrame.new(XOffset or 0,YOffset or 0,ZOffset or 0)
+                                    local targetHRP=target.Character:FindFirstChild("HumanoidRootPart")
+                                    if targetHRP then
+                                        local tpPos=getPredictedPos(targetHRP.Position)
+                                        hrp.CFrame=CFrame.new(tpPos)*CFrame.new(XOffset,YOffset,ZOffset)
                                     end
                                 end
                             end
@@ -1770,13 +1656,14 @@ Oneshots:CreateToggle({
                         if SelectedPlayer then
                             local target=Players:FindFirstChild(SelectedPlayer)
                             if target and target.Character then
-                                local tHRP=target.Character:FindFirstChild("HumanoidRootPart")
-                                if tHRP then
+                                local targetHRP=target.Character:FindFirstChild("HumanoidRootPart")
+                                if targetHRP then
                                     local trex=char:FindFirstChild("T-Rex-T-Rex")
                                     if trex then
                                         local remote=trex:FindFirstChild("LeftClickRemote")
                                         if remote then
-                                            local d=(tHRP.Position-hrp.Position).Unit
+                                            local aimPos=getPredictedPos(targetHRP.Position)
+                                            local d=(aimPos-hrp.Position).Unit
                                             remote:FireServer(vector.create(d.X,d.Y,d.Z),1)
                                         end
                                     end
@@ -1799,14 +1686,14 @@ Oneshots:CreateToggle({
 })
 
 Oneshots:CreateToggle({
-    Name="Spikey", CurrentValue=false,
+    Name="Spikey 67", CurrentValue=false,
     Callback=function(v)
         spikeee=v
         if v then
             if spikeyconnection then task.cancel(spikeyconnection) end
             spikeyconnection=task.spawn(function()
                 while spikeee do
-                    local char=Players.LocalPlayer.Character
+                    local char=lp.Character
                     if char and char:FindFirstChild("TridentGrabZ") then
                         while char:FindFirstChild("TridentGrabZ") do
                             local hrp=char:FindFirstChild("HumanoidRootPart")
@@ -1865,12 +1752,15 @@ Oneshots:CreateToggle({
     end,
 })
 
+-- ════════════════════════════════════════
+--  KEYBINDS
+-- ════════════════════════════════════════
 local toggled=false
 UIS.InputBegan:Connect(function(input,gp)
     if gp then return end
     if input.KeyCode==Enum.KeyCode.B then
         toggled=not toggled
-        local char=Players.LocalPlayer.Character
+        local char=lp.Character
         if not char then return end
         local hrp=char:FindFirstChild("HumanoidRootPart")
         if not hrp then return end
@@ -1895,7 +1785,7 @@ local onenabledshotho=false
 UIS.InputBegan:Connect(function(input,gp)
     if gp then return end
     if input.KeyCode~=Enum.KeyCode.N then return end
-    local char=Players.LocalPlayer.Character
+    local char=lp.Character
     if not char then return end
     local hrp=char:FindFirstChild("HumanoidRootPart")
     if not hrp then return end
@@ -1910,4 +1800,7 @@ UIS.InputBegan:Connect(function(input,gp)
     end
 end)
 
+-- ════════════════════════════════════════
+--  CONFIG
+-- ════════════════════════════════════════
 Rayfield:LoadConfiguration()
