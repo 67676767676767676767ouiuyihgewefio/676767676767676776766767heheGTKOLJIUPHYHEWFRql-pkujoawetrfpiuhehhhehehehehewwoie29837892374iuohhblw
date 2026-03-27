@@ -694,123 +694,100 @@ end
 -- ════════════════════════════════════════
 --  SPAWN ABUSE
 -- ════════════════════════════════════════
-local spawnAbuseEnabled = false
-local spawnAbuseThread = nil
-local safeZoneActive = false
-local spawnXOffset, spawnYOffset, spawnZOffset = 0, 0, 0
+lOneshots:CreateToggle({
+    Name = "Spawn abuse (Enable killaura)",
+    CurrentValue = false,
+    Callback = function(v)
+        TestingFarm = v
 
-local function isInCombat()
-    local playerGui = player:FindFirstChild("PlayerGui")
-    if not playerGui then return false end
-    local mainGui = playerGui:FindFirstChild("Main")
-    if not mainGui then return false end
-    local bottomHUD = mainGui:FindFirstChild("BottomHUDList")
-    if not bottomHUD then return false end
-    local inCombatUI = bottomHUD:FindFirstChild("InCombat")
-    if not inCombatUI then return false end
-    return inCombatUI.Visible
-end
+        if v then
+            if TestingFarmConnection then task.cancel(TestingFarmConnection) end
 
-local function startSpawnAbuse()
-    spawnAbuseEnabled = true
-    if spawnAbuseThread then task.cancel(spawnAbuseThread) end
-    spawnAbuseThread = task.spawn(function()
-        while spawnAbuseEnabled do
-            task.wait(0.001)
-            local char = player.Character
-            if not char then continue end
-            local hrp = char:FindFirstChild("HumanoidRootPart")
-            if not hrp then continue end
-            local hum = char:FindFirstChild("Humanoid")
-            if not hum then continue end
+            TestingFarmConnection = task.spawn(function()
+                while TestingFarm do
+                    task.wait(0.001)
 
-            -- Step 1: Kill self if not in combat
-            pcall(function()
-                if hum.Health > 0 and not isInCombat() then
-                    hum.Health = 0
-                end
-            end)
+                    local player = Players.LocalPlayer
+                    local char = player.Character
+                    if not char then continue end
 
-            -- Step 2: Loop TP to target while dead
-            pcall(function()
-                if (hum.Health <= 0 or hum:GetState() == Enum.HumanoidStateType.Dead) and tpSelectedName and not safeZoneActive then
-                    while spawnAbuseEnabled and (hum.Health <= 0 or hum:GetState() == Enum.HumanoidStateType.Dead) do
-                        local target = Players:FindFirstChild(tpSelectedName)
-                        if target and target.Character then
-                            local targetHRP = target.Character:FindFirstChild("HumanoidRootPart")
-                            if targetHRP then
-                                hrp.CFrame = targetHRP.CFrame * CFrame.new(spawnXOffset, spawnYOffset, spawnZOffset)
+                    local hrp = char:FindFirstChild("HumanoidRootPart")
+                    if not hrp then continue end
+
+                    local humanoid = char:FindFirstChild("Humanoid")
+                    if not humanoid then continue end
+
+                    pcall(function()
+                        if humanoid.Health > 0 and humanoid:GetState() ~= Enum.HumanoidStateType.Dead then
+                            if not IsInCombat() then
+                                hrp.CFrame = hrp.CFrame * CFrame.new(0, 20000, 0)
+                                task.wait(0.1)
                             end
                         end
-                        task.wait(0.001)
-                    end
-                end
-            end)
+                    end)
 
-            -- Step 3: On respawn, instant TP to target then loop sky TP until HP == 0
-            pcall(function()
-                if hum.Health <= 0 or hum:GetState() == Enum.HumanoidStateType.Dead then
-                    local newChar = player.CharacterAdded:Wait()
-                    local newHRP = newChar:WaitForChild("HumanoidRootPart", 5)
-                    local newHum = newChar:WaitForChild("Humanoid", 5)
-                    if not newHRP or not newHum then return end
-
-                    -- Instant TP to target on spawn
-                    if tpSelectedName and not safeZoneActive then
-                        local target = Players:FindFirstChild(tpSelectedName)
-                        if target and target.Character then
-                            local targetHRP = target.Character:FindFirstChild("HumanoidRootPart")
-                            if targetHRP then
-                                newHRP.CFrame = targetHRP.CFrame * CFrame.new(spawnXOffset, spawnYOffset, spawnZOffset)
-                            end
-                        end
-                    end
-
-                    -- Loop sky TP every 0.1s until HP == 0
-                    while spawnAbuseEnabled and newHum.Health > 0 do
-                        task.wait(0.1)
-                        local pos = newHRP.Position
-                        newHRP.CFrame = CFrame.new(pos.X, pos.Y + 20000, pos.Z)
-                    end
-                end
-            end)
-
-            -- Equip and fire T-Rex
-            pcall(function()
-                local trex = player.Backpack:FindFirstChild("T-Rex-T-Rex")
-                if trex then hum:EquipTool(trex) end
-            end)
-
-            pcall(function()
-                if tpSelectedName then
-                    local target = Players:FindFirstChild(tpSelectedName)
-                    if target and target.Character then
-                        local targetHRP = target.Character:FindFirstChild("HumanoidRootPart")
-                        if targetHRP then
-                            local trex = char:FindFirstChild("T-Rex-T-Rex")
-                            if trex then
-                                local remote = trex:FindFirstChild("LeftClickRemote")
-                                if remote then
-                                    local direction = (targetHRP.Position - hrp.Position).Unit
-                                    remote:FireServer(vector.create(direction.X, direction.Y, direction.Z), 1)
+                    pcall(function()
+                        if SelectedPlayer and not SafeZoneActive then
+                            if humanoid.Health <= 0 or humanoid:GetState() == Enum.HumanoidStateType.Dead then
+                                local target = Players:FindFirstChild(SelectedPlayer)
+                                if target and target.Character then
+                                    local targetHRP = target.Character:FindFirstChild("HumanoidRootPart")
+                                    if targetHRP then
+                                        hrp.CFrame = targetHRP.CFrame * CFrame.new(XOffset or 0, YOffset or 0, ZOffset or 0)
+                                    end
                                 end
                             end
                         end
-                    end
+                    end)
+
+                    pcall(function()
+                        local trex = player.Backpack:FindFirstChild("T-Rex-T-Rex")
+                        if trex then
+                            humanoid:EquipTool(trex)
+                        end
+                    end)
+
+                    pcall(function()
+                        if SelectedPlayer then
+                            local target = Players:FindFirstChild(SelectedPlayer)
+                            if target and target.Character then
+                                local targetHRP = target.Character:FindFirstChild("HumanoidRootPart")
+                                if targetHRP then
+                                    local trex = char:FindFirstChild("T-Rex-T-Rex")
+                                    if trex then
+                                        local remote = trex:FindFirstChild("LeftClickRemote")
+                                        if remote then
+                                            local direction = (targetHRP.Position - hrp.Position).Unit
+                                            remote:FireServer(
+                                                vector.create(direction.X, direction.Y, direction.Z),
+                                                1
+                                            )
+                                        end
+                                    end
+                                end
+                            end
+                        end
+                    end)
+
+                    pcall(function()
+                        ReplicatedStorage:WaitForChild("Remotes"):WaitForChild("CommF_"):InvokeServer(Buso)
+                    end)
+
+                    pcall(function()
+                        if not IsInCombat() then
+                            humanoid.Health = 0
+                        end
+                    end)
                 end
             end)
-
-            pcall(function()
-                ReplicatedStorage:WaitForChild("Remotes"):WaitForChild("CommF_"):InvokeServer("Buso")
-            end)
+        else
+            if TestingFarmConnection then
+                task.cancel(TestingFarmConnection)
+                TestingFarmConnection = nil
+            end
         end
-    end)
-end
-
-local function stopSpawnAbuse()
-    spawnAbuseEnabled = false
-    if spawnAbuseThread then task.cancel(spawnAbuseThread) spawnAbuseThread = nil end
-end
+    end,
+})
 
 -- ════════════════════════════════════════
 --  SPIKEY 67
